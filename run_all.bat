@@ -1,0 +1,6 @@
+@echo off
+echo Starting Wesker Local HTTP & Python RL Server...
+start python server.py
+timeout /t 2
+echo Opening Game in Web Browser...
+start http://localhost:8000/game.html

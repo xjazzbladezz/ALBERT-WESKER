@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Albert Wesker: Matrix Showdown</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Courier New', monospace; user-select: none; }
+        body { background: #050505; color: #fff; overflow: hidden; width: 100vw; height: 100vh; }
+        #canvas-container { width: 100%; height: 100%; position: absolute; top:0; left:0; z-index: 1; }
+        #hud {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 10; pointer-events: none; display: flex; flex-direction: column;
+            justify-content: space-between; padding: 20px;
+        }
+        .header { display: flex; justify-content: space-between; align-items: flex-start; }
+        .boss-bar-container {
+            width: 450px; background: rgba(0,0,0,0.85); border: 2px solid #888;
+            padding: 8px; box-shadow: 0 0 15px rgba(255,0,0,0.3);
+        }
+        .boss-name { font-weight: bold; color: #ff3333; font-size: 16px; margin-bottom: 4px; letter-spacing: 2px; }
+        .boss-bar { width: 100%; height: 16px; background: #222; border: 1px solid #444; overflow: hidden; }
+        .boss-fill { width: 100%; height: 100%; background: linear-gradient(90deg, #990000, #ff2222); transition: width 0.1s; }
+        .player-status {
+            background: rgba(0,0,0,0.85); border: 2px solid #00ffcc; padding: 12px 20px;
+            color: #00ffcc; font-size: 18px; font-weight: bold; text-shadow: 0 0 5px #00ffcc;
+        }
+        .crosshair {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.8); border-radius: 50%;
+            pointer-events: none; z-index: 10;
+        }
+        .crosshair::after { content: ''; display: block; width: 2px; height: 2px; background: red; margin: 3px auto; border-radius: 50%; }
+        .overlay-screen {
+            position: absolute; top:0; left:0; width:100%; height:100%;
+            background: rgba(0,0,0,0.9); z-index: 100; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; text-align: center; color: #fff;
+        }
+        .btn {
+            margin-top: 20px; padding: 12px 30px; background: #aa0000; color: #fff;
+            border: 2px solid #ff5555; cursor: pointer; font-size: 18px; font-weight: bold;
+            transition: 0.2s; text-transform: uppercase; letter-spacing: 2px;
+        }
+        .btn:hover { background: #ff0000; box-shadow: 0 0 15px #ff0000; }
+        #status-tag { position: absolute; bottom: 20px; left: 20px; font-size: 14px; color: #00ffcc; z-index: 30; }
+        #damage-flash {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255,0,0,0.3); pointer-events: none; opacity: 0;
+            transition: opacity 0.1s ease-out; z-index: 50;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+    <div id="damage-flash"></div>
+
+    <div id="hud">
+        <div class="header">
+            <div class="player-status">
+                HEALTH: <span id="p-hp">200</span> / 200<br>
+                MODE: FAST TELEPORT + LASER SHOOT
+            </div>
+            <div class="boss-bar-container">
+                <div class="boss-name">ALBERT WESKER (Python RL Connected)</div>
+                <div class="boss-bar"><div id="b-fill" class="boss-fill"></div></div>
+            </div>
+        </div>
+        <div class="crosshair"></div>
+    </div>
+
+    <div id="status-tag">PYTHON RL SERVER: <span id="server-status" style="color:yellow;">CONNECTING...</span></div>
+
+    <div id="start-screen" class="overlay-screen">
+        <h1 style="font-size: 42px; color: #ff3333; letter-spacing: 4px;">RESIDENT EVIL: WESKER SHOWDOWN</h1>
+        <p style="color: #aaa; margin: 15px 0 20px 0;">Fast Teleportation & Wesker Laser Fire FX Enabled!</p>
+        <p style="color: #00ffcc; font-size: 14px;">Controls: [WASD] Move | [Mouse] Aim | [Left Click] Shoot</p>
+        <button class="btn" onclick="startGame()">START FIGHT</button>
+    </div>
+
+    <script>
+        let scene, camera, renderer, socket;
+        let player = { hp: 200, pos: new THREE.Vector3(0, 1.6, 12), speed: 0.12 };
+        let wesker = { group: null, hp: 300, maxHp: 300, pos: new THREE.Vector3(0, 0, -8), danceAngle: 0, muzzleLight: null };
+        let keys = {}, isLocked = false, pitch = 0, yaw = 0, ghostTrails = [], laserBeams = [];
+
+        function connectWebSocket() {
+            socket = new WebSocket("ws://localhost:8765");
+            socket.onopen = () => {
+                document.getElementById('server-status').innerText = "ONLINE";
+                document.getElementById('server-status').style.color = "#00ff00";
+            };
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.action === 1) teleportWeskerRandom(-4.0); // Fast Left Blink
+                else if (data.action === 2) teleportWeskerRandom(4.0); // Fast Right Blink
+                else if (data.action === 3) attackPlayerWithEffects(); // Shoot Effects
+            };
+            socket.onerror = () => {
+                document.getElementById('server-status').innerText = "OFFLINE (Local Mode)";
+                document.getElementById('server-status').style.color = "#ff3333";
+            };
+        }
+
+        function teleportWeskerRandom(dirX) {
+            if (!wesker.group) return;
+            // Multiple Red Phantom Trail Ghosts
+            createGhostTrail(wesker.group.position, wesker.group.rotation);
+            
+            // Random location Shifting (Fast Blink)
+            let randomZ = (Math.random() - 0.5) * 8;
+            wesker.group.position.x += dirX + (Math.random() - 0.5) * 2;
+            wesker.group.position.z = Math.max(-15, Math.min(5, wesker.group.position.z + randomZ));
+            
+            createGhostTrail(wesker.group.position, wesker.group.rotation);
+        }
+
+        function attackPlayerWithEffects() {
+            if (!wesker.group) return;
+
+            // 1. Muzzle Flash Light from Wesker
+            wesker.muzzleLight.intensity = 5;
+            setTimeout(() => { wesker.muzzleLight.intensity = 0; }, 80);
+
+            // 2. Red Laser Tracer Beam Effect from Wesker to Player
+            const startPos = wesker.group.position.clone().add(new THREE.Vector3(0, 1.2, 0));
+            const endPos = camera.position.clone().add(new THREE.Vector3(0, -0.2, 0));
+
+            const points = [startPos, endPos];
+            const laserGeo = new THREE.BufferGeometry().setFromPoints(points);
+            const laserMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 3 });
+            const laserLine = new THREE.Line(laserGeo, laserMat);
+            scene.add(laserLine);
+            laserBeams.push({ line: laserLine, life: 6 });
+
+            // 3. Screen Red Flash Damage Effect
+            const flash = document.getElementById('damage-flash');
+            flash.style.opacity = '0.6';
+            setTimeout(() => { flash.style.opacity = '0'; }, 100);
+
+            // 4. Reduce Player Health
+            player.hp = Math.max(0, player.hp - 4);
+            document.getElementById('p-hp').innerText = player.hp;
+        }
+
+        function init() {
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0a10);
+            scene.fog = new THREE.FogExp2(0x0a0a10, 0.03);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.copy(player.pos);
+
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0));
+            renderer.shadowMap.enabled = false;
+            container.appendChild(renderer.domElement);
+
+            const ambLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambLight);
+
+            buildArena();
+            buildWesker();
+            setupControls();
+            connectWebSocket();
+        }
+
+        function buildArena() {
+            const floorGeo = new THREE.PlaneGeometry(40, 40);
+            const floorMat = new THREE.MeshBasicMaterial({ color: 0x1a1a24 });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = Math.PI / 2;
+            scene.add(floor);
+
+            const grid = new THREE.GridHelper(40, 20, 0xff0000, 0x333344);
+            grid.position.y = 0.01;
+            scene.add(grid);
+        }
+
+        function buildWesker() {
+            wesker.group = new THREE.Group();
+            const headMat = new THREE.MeshLambertMaterial({ color: 0xffdbac });
+            const coatMat = new THREE.MeshLambertMaterial({ color: 0x111115 });
+
+            const head = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.45, 0.4), headMat);
+            head.position.y = 1.7;
+            
+            const glasses = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.1, 0.15), new THREE.MeshBasicMaterial({ color: 0x050505 }));
+            glasses.position.set(0, 0.05, 0.18);
+            head.add(glasses);
+
+            const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.4), coatMat);
+            body.position.y = 1.05;
+
+            // Muzzle Light for Wesker's Gunshots
+            wesker.muzzleLight = new THREE.PointLight(0xff2200, 0, 10);
+            wesker.muzzleLight.position.set(0, 1.2, 0.5);
+            wesker.group.add(wesker.muzzleLight);
+
+            wesker.group.add(head, body);
+            wesker.group.position.copy(wesker.pos);
+            scene.add(wesker.group);
+        }
+
+        function createGhostTrail(pos, rot) {
+            const ghost = wesker.group.clone();
+            ghost.position.copy(pos);
+            ghost.rotation.copy(rot);
+            ghost.traverse(c => { if(c.isMesh) c.material = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, transparent: true, opacity: 0.6 }); });
+            scene.add(ghost);
+            ghostTrails.push({ mesh: ghost, opacity: 0.6 });
+        }
+
+        function shoot() {
+            if (!isLocked) return;
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                const aimDist = camera.position.distanceTo(wesker.group.position);
+                socket.send(JSON.stringify({ event: "player_shoot", distance: aimDist }));
+            }
+
+            const intersects = raycaster.intersectObject(wesker.group, true);
+            if (intersects.length > 0) {
+                wesker.hp = Math.max(0, wesker.hp - 15);
+                document.getElementById('b-fill').style.width = (wesker.hp / wesker.maxHp * 100) + '%';
+            }
+        }
+
+        function setupControls() {
+            document.addEventListener('keydown', e => keys[e.code] = true);
+            document.addEventListener('keyup', e => keys[e.code] = false);
+            document.addEventListener('mousemove', e => {
+                if (!isLocked) return;
+                yaw -= e.movementX * 0.002;
+                pitch -= e.movementY * 0.002;
+            });
+            document.addEventListener('mousedown', e => { if (e.button === 0) shoot(); });
+        }
+
+        function startGame() {
+            document.getElementById('start-screen').style.display = 'none';
+            document.body.requestPointerLock();
+            isLocked = true;
+        }
+
+        document.addEventListener('pointerlockchange', () => { isLocked = (document.pointerLockElement === document.body); });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (isLocked) {
+                camera.rotation.order = 'YXZ';
+                camera.rotation.y = yaw;
+                camera.rotation.x = pitch;
+
+                const moveVec = new THREE.Vector3();
+                if (keys['KeyW']) moveVec.z -= 1;
+                if (keys['KeyS']) moveVec.z += 1;
+                if (keys['KeyA']) moveVec.x -= 1;
+                if (keys['KeyD']) moveVec.x += 1;
+                moveVec.normalize().applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+                camera.position.addScaledVector(moveVec, player.speed);
+            }
+
+            // Wesker Fast Location Shifting Dance
+            wesker.danceAngle += 0.035;
+            wesker.group.position.x += Math.sin(wesker.danceAngle) * 0.15;
+            wesker.group.lookAt(camera.position.x, wesker.group.position.y, camera.position.z);
+
+            // Decay Ghost Trails
+            for (let i = ghostTrails.length - 1; i >= 0; i--) {
+                ghostTrails[i].opacity -= 0.04;
+                ghostTrails[i].mesh.traverse(c => { if (c.material) c.material.opacity = ghostTrails[i].opacity; });
+                if (ghostTrails[i].opacity <= 0) {
+                    scene.remove(ghostTrails[i].mesh);
+                    ghostTrails.splice(i, 1);
+                }
+            }
+
+            // Remove Laser Beams
+            for (let i = laserBeams.length - 1; i >= 0; i--) {
+                laserBeams[i].life--;
+                if (laserBeams[i].life <= 0) {
+                    scene.remove(laserBeams[i].line);
+                    laserBeams.splice(i, 1);
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.onload = () => { init(); animate(); };
+    </script>
+</body>
+</html>
